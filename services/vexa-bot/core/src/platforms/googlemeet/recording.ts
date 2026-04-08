@@ -367,9 +367,135 @@ export async function startGoogleRecording(page: Page, botConfig: BotConfig): Pr
             if (!processor) {
               return null;
             }
-            // Setup audio data processing
+
+            // ── Per-speaker streams setup ─────────────────────────────────
+            // Check if the RTC hook created per-speaker audio elements
+            const perSpeakerElements: HTMLAudioElement[] = (window as any).__vexaPerSpeakerAudioElements || [];
+            const perSpeakerMode = perSpeakerElements.length >= 2 && transcriptionEnabled;
+
+            if (perSpeakerMode) {
+              (window as any).logBot(`[PerSpeaker] Found ${perSpeakerElements.length} per-speaker audio elements. Setting up separate streams.`);
+
+              // Create a separate audio pipeline + WhisperLive connection for each track
+              const perSpeakerPipelines: Array<{trackId: string; audio: any; whisper: any}> = [];
+
+              for (let i = 0; i < Math.min(perSpeakerElements.length, 3); i++) {
+                const el = perSpeakerElements[i];
+                const trackId = el.dataset.vexaTrackId || `track-${i}`;
+
+                try {
+                  // Create independent audio service for this track
+                  const trackAudioService = new browserUtils.BrowserAudioService({
+                    targetSampleRate: 16000,
+                    bufferSize: 4096,
+                    inputChannels: 1,
+                    outputChannels: 1
+                  });
+
+                  // Create independent WhisperLive connection
+                  const trackWhisper = new browserUtils.BrowserWhisperLiveService({
+                    whisperLiveUrl: whisperUrlForBrowser as string
+                  }, true);
+
+                  // Initialize audio from this single element
+                  const trackStream = await trackAudioService.createCombinedAudioStream([el]);
+                  await trackAudioService.initializeAudioProcessor(trackStream);
+
+                  // Connect WhisperLive for this track
+                  const trackOnMessage = (data: any) => {
+                    if (data?.status === 'SERVER_READY') {
+                      trackWhisper.setServerReady(true);
+                      (window as any).logBot(`[PerSpeaker] Track ${i} (${trackId}) server ready.`);
+                    }
+                    // Update last transcription timestamp for keep-alive
+                    if (Array.isArray(data?.segments)) {
+                      const completed = data.segments.filter((s: any) => s?.completed && s?.text);
+                      if (completed.length > 0) {
+                        (window as any).__vexaLastTranscriptionTimestamp = Date.now();
+                        const text = completed.map((s: any) => s.text).join(' ');
+                        const speakerName = (window as any).__vexaGetSpeakerForTrack?.(trackId) || `Speaker ${i + 1}`;
+                        (window as any).logBot(`[PerSpeaker] Track ${i} (${speakerName}): ${text}`);
+                      }
+                    }
+                  };
+                  const trackOnError = () => {};
+                  const trackOnClose = async () => {
+                    (window as any).logBot(`[PerSpeaker] Track ${i} WebSocket closed. Reconnecting...`);
+                    try { trackWhisper.setServerReady(false); } catch {}
+                    setTimeout(async () => {
+                      try {
+                        await trackWhisper.connectToWhisperLive(
+                          (window as any).__vexaBotConfig,
+                          trackOnMessage, trackOnError, trackOnClose
+                        );
+                      } catch {}
+                    }, 2000);
+                  };
+
+                  await trackWhisper.connectToWhisperLive(
+                    (window as any).__vexaBotConfig,
+                    trackOnMessage, trackOnError, trackOnClose
+                  );
+
+                  // Send audio data from this track to its own WhisperLive connection
+                  trackAudioService.setupAudioDataProcessor(async (audioData: Float32Array) => {
+                    if (!trackWhisper.isReady()) return;
+                    trackWhisper.sendAudioChunkMetadata(audioData.length, 16000);
+                    trackWhisper.sendAudioData(audioData);
+
+                    // Send speaker identity if we've learned it via CSRC mapping
+                    const speakerName = (window as any).__vexaGetSpeakerForTrack?.(trackId);
+                    if (speakerName && !(trackWhisper as any).__lastSpeakerSent) {
+                      (trackWhisper as any).__lastSpeakerSent = speakerName;
+                      const sessionStartTime = trackAudioService.getSessionAudioStartTime();
+                      if (sessionStartTime) {
+                        trackWhisper.sendSpeakerEvent(
+                          'SPEAKER_START', speakerName, trackId,
+                          Date.now() - sessionStartTime,
+                          (window as any).__vexaBotConfig
+                        );
+                      }
+                    } else if (speakerName && (trackWhisper as any).__lastSpeakerSent !== speakerName) {
+                      // Speaker on this track changed (SFU reassignment)
+                      const sessionStartTime = trackAudioService.getSessionAudioStartTime();
+                      if (sessionStartTime) {
+                        trackWhisper.sendSpeakerEvent(
+                          'SPEAKER_END', (trackWhisper as any).__lastSpeakerSent, trackId,
+                          Date.now() - sessionStartTime,
+                          (window as any).__vexaBotConfig
+                        );
+                        trackWhisper.sendSpeakerEvent(
+                          'SPEAKER_START', speakerName, trackId,
+                          Date.now() - sessionStartTime,
+                          (window as any).__vexaBotConfig
+                        );
+                        (trackWhisper as any).__lastSpeakerSent = speakerName;
+                      }
+                    }
+                  });
+
+                  perSpeakerPipelines.push({trackId, audio: trackAudioService, whisper: trackWhisper});
+                  (window as any).logBot(`[PerSpeaker] Track ${i} (${trackId}) pipeline initialized.`);
+                } catch (err: any) {
+                  (window as any).logBot(`[PerSpeaker] Failed to init track ${i}: ${err?.message || err}`);
+                }
+              }
+
+              (window as any).__vexaPerSpeakerPipelines = perSpeakerPipelines;
+              (window as any).logBot(`[PerSpeaker] ${perSpeakerPipelines.length} per-speaker pipelines active. Mixed stream kept as fallback for recording.`);
+            }
+            // ── End per-speaker streams setup ─────────────────────────────
+
+            // Setup audio data processing (mixed stream — used for recording and as fallback)
             audioService.setupAudioDataProcessor(async (audioData: Float32Array, sessionStartTime: number | null) => {
               if (!transcriptionEnabled || !whisperLiveService) {
+                return;
+              }
+              // In per-speaker mode, the mixed stream still feeds the primary WhisperLive
+              // as a fallback (e.g., if per-speaker pipelines fail). The downstream
+              // transcription-collector will deduplicate overlapping segments.
+              if (perSpeakerMode) {
+                // Skip sending mixed audio if per-speaker is active — avoid duplicate transcription
                 return;
               }
               // Only send after server ready (canonical Teams pattern)
@@ -445,6 +571,8 @@ export async function startGoogleRecording(page: Page, botConfig: BotConfig): Pr
                         (window as any).__lastTranscript = transcriptKey;
                         logFn(`Transcript: ${transcriptKey}`);
                       }
+                      // Update last transcription timestamp for leave-detection keep-alive
+                      (window as any).__vexaLastTranscriptionTimestamp = Date.now();
                     }
                   }
                 };
@@ -686,10 +814,15 @@ export async function startGoogleRecording(page: Page, botConfig: BotConfig): Pr
                   const indicatorSpeaking = hasSpeakingIndicator(container) || inferSpeakingFromClasses(container).speaking;
                   const prev = lastSpeakingById.get(id) || false;
                   if (indicatorSpeaking && !prev) {
-                    (window as any).logBot(`[Google Poll] SPEAKER_START ${getGoogleParticipantName(container)}`);
+                    const spName = getGoogleParticipantName(container);
+                    (window as any).logBot(`[Google Poll] SPEAKER_START ${spName}`);
                     sendGoogleSpeakerEvent('SPEAKER_START', container);
                     lastSpeakingById.set(id, true);
                     speakingStates.set(id, 'speaking');
+                    // Learn CSRC → name mapping for per-speaker audio
+                    if (typeof (window as any).__vexaLearnSpeakerCsrc === 'function') {
+                      (window as any).__vexaLearnSpeakerCsrc(spName);
+                    }
                   } else if (!indicatorSpeaking && prev) {
                     (window as any).logBot(`[Google Poll] SPEAKER_END ${getGoogleParticipantName(container)}`);
                     sendGoogleSpeakerEvent('SPEAKER_END', container);
@@ -742,6 +875,13 @@ export async function startGoogleRecording(page: Page, botConfig: BotConfig): Pr
               return names;
             };
             (window as any).getGoogleMeetActiveParticipantsCount = () => {
+              // Primary: WebRTC-based participant count (reliable)
+              const webrtcCount = typeof (window as any).__vexaGetWebRTCParticipantCount === 'function'
+                ? (window as any).__vexaGetWebRTCParticipantCount()
+                : 0;
+              if (webrtcCount > 0) return webrtcCount;
+
+              // Fallback: DOM-based count (fragile but works if RTC hook didn't install)
               return (window as any).getGoogleMeetActiveParticipants().length;
             };
             
@@ -787,9 +927,19 @@ export async function startGoogleRecording(page: Page, botConfig: BotConfig): Pr
                 finish();
               };
 
+              // Track last transcription timestamp for audio energy keep-alive
+              (window as any).__vexaLastTranscriptionTimestamp = (window as any).__vexaLastTranscriptionTimestamp || 0;
+
               const checkInterval = setInterval(() => {
-                // Check participant count using the comprehensive helper
-                const currentParticipantCount = (window as any).getGoogleMeetActiveParticipantsCount ? (window as any).getGoogleMeetActiveParticipantsCount() : 0;
+                // Check participant count using the comprehensive helper (now WebRTC-based with DOM fallback)
+                let currentParticipantCount = (window as any).getGoogleMeetActiveParticipantsCount ? (window as any).getGoogleMeetActiveParticipantsCount() : 0;
+
+                // Audio energy keep-alive: if we received transcription in the last 2 minutes,
+                // at least someone is speaking — don't consider the bot alone
+                const hasRecentTranscription = (Date.now() - ((window as any).__vexaLastTranscriptionTimestamp || 0)) < 120000;
+                if (hasRecentTranscription && currentParticipantCount <= 1) {
+                  currentParticipantCount = 2; // Override: someone is definitely speaking
+                }
                 
                 if (currentParticipantCount !== lastParticipantCount) {
                   (window as any).logBot(`Participant check: Found ${currentParticipantCount} unique participants from central list.`);

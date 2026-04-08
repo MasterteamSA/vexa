@@ -121,6 +121,8 @@ export class BrowserAudioService {
     if (!this.audioContext) {
       this.audioContext = new AudioContext();
     }
+    // Ensure AudioContext is running (may be auto-suspended by the browser)
+    try { await this.audioContext.resume(); } catch {}
     if (!this.destinationNode) {
       this.destinationNode = this.audioContext.createMediaStreamDestination();
     }

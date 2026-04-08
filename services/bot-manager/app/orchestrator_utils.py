@@ -227,9 +227,9 @@ async def start_bot_container(
         "redisUrl": REDIS_URL,
         "container_name": container_name,  # ADDED: Container name for identification
         "automaticLeave": {
-            "waitingRoomTimeout": 300000,
-            "noOneJoinedTimeout": 120000,
-            "everyoneLeftTimeout": 60000
+            "waitingRoomTimeout": int(os.getenv("WAITING_ROOM_TIMEOUT", "300000")),
+            "noOneJoinedTimeout": int(os.getenv("NO_ONE_JOINED_TIMEOUT", "120000")),
+            "everyoneLeftTimeout": int(os.getenv("EVERYONE_LEFT_TIMEOUT", "300000")),
         },
         "botManagerCallbackUrl": f"http://bot-manager:8080/bots/internal/callback/exited",
         "recordingEnabled": user_recording_config.get("enabled", os.getenv("RECORDING_ENABLED", "false").lower() == "true"),
