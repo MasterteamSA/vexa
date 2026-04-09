@@ -292,9 +292,16 @@ class RemoteTranscriber:
         if prompt:
             data["prompt"] = prompt
         
+        # For APIs like Groq that use a separate /translations endpoint
+        # instead of a task parameter, swap the URL when translating.
+        request_url = self.api_url
         if task == "translate":
-            data["task"] = task
-        
+            if "groq.com" in self.api_url:
+                # Groq uses /audio/translations instead of task param
+                request_url = self.api_url.replace("/transcriptions", "/translations")
+            else:
+                data["task"] = task
+
         # Add response_format if supported (some APIs may ignore this)
         if self.response_format:
             data["response_format"] = self.response_format
@@ -311,7 +318,7 @@ class RemoteTranscriber:
                 files = {"file": ("audio.wav", audio_bytes, "audio/wav")}
                 
                 response = self.http_client.post(
-                    self.api_url,
+                    request_url,
                     headers=headers,
                     files=files,
                     data=data,
