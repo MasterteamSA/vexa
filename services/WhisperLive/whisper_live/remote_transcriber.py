@@ -295,19 +295,27 @@ class RemoteTranscriber:
         # For APIs like Groq that use a separate /translations endpoint
         # instead of a task parameter, swap the URL when translating.
         request_url = self.api_url
+        is_groq = "groq.com" in (self.api_url or "")
         if task == "translate":
-            if "groq.com" in self.api_url:
-                # Groq uses /audio/translations instead of task param
+            if is_groq:
                 request_url = self.api_url.replace("/transcriptions", "/translations")
+                # whisper-large-v3-turbo does not support translate on Groq
+                data["model"] = "whisper-large-v3"
             else:
                 data["task"] = task
 
         # Add response_format if supported (some APIs may ignore this)
         if self.response_format:
             data["response_format"] = self.response_format
-        
+
         if self.timestamp_granularities:
             data["timestamp_granularities"] = self.timestamp_granularities
+
+        # Strip params that Groq does not accept (must be AFTER all params are added)
+        if is_groq:
+            data.pop("transcription_tier", None)
+            data.pop("vad_model", None)
+            data.pop("timestamp_granularities", None)
         
         # Log request details (masked)
         auth_header_masked = f"Bearer {self.api_key[:4]}...{self.api_key[-4:]}" if len(self.api_key) > 8 else "Bearer ***"
