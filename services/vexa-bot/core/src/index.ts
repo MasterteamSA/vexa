@@ -1082,6 +1082,14 @@ export async function runBot(botConfig: BotConfig): Promise<void> {// Store botC
       args: getBrowserArgs(!!botConfig.voiceAgentEnabled),
     });
 
+    // Load Google auth state if available (signed-in bot for Google Meet)
+    const googleAuthPath = '/app/google-auth-state.json';
+    const fs = require('fs');
+    const hasGoogleAuth = fs.existsSync(googleAuthPath);
+    if (hasGoogleAuth) {
+      log('[Bot] Loading Google auth state for signed-in bot mode');
+    }
+
     // Create a new page with permissions and viewport for non-Teams
     const context = await browserInstance.newContext({
       permissions: ["camera", "microphone"],
@@ -1089,7 +1097,8 @@ export async function runBot(botConfig: BotConfig): Promise<void> {// Store botC
       viewport: {
         width: 1280,
         height: 720
-      }
+      },
+      ...(hasGoogleAuth ? { storageState: googleAuthPath } : {}),
     });
 
     // Set voice agent flag before virtual camera script so it knows
