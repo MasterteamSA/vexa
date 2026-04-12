@@ -98,26 +98,20 @@ export async function waitForGoogleMeetingAdmission(
     
     // FIRST: Check if bot is already admitted (no waiting room needed)
     log("Checking if bot is already admitted to the Google Meet meeting...");
-    
+
     // Check for any visible admission indicator (multiple selectors for robustness)
+    // Admission indicators are AUTHORITATIVE — if we find 2+ meeting controls (Leave call,
+    // participant-id, microphone, etc.), the bot is in the meeting. Period.
+    // We do NOT check waiting room indicators here because stray elements (loading spinners,
+    // progressbars) can appear inside the meeting room and cause false negatives.
     const initialAdmissionFound = await checkForGoogleAdmissionIndicators(page);
-    
-    // Negative check: ensure we're not still in lobby/pre-join
-    const initialLobbyStillVisible = await checkForWaitingRoomIndicators(page);
-    
-    if (initialAdmissionFound && !initialLobbyStillVisible) {
-      log(`Found Google Meet admission indicator: visible meeting controls - Bot is already admitted to the meeting!`);
-      
-      // Take screenshot when already admitted
+
+    if (initialAdmissionFound) {
+      log(`Found Google Meet admission indicators: visible meeting controls - Bot is already admitted!`);
+
       await page.screenshot({ path: '/app/storage/screenshots/bot-checkpoint-2-admitted.png', fullPage: true });
       log("📸 Screenshot taken: Bot confirmed already admitted to meeting");
-      
-      // CRITICAL FIX: When bot is immediately admitted, skip awaiting_admission callback
-      // The bot should go directly from "joining" -> "active", not "joining" -> "awaiting_admission" -> "active"
-      // Sending awaiting_admission here causes a race condition where the callback arrives before
-      // the "joining" callback is processed, causing REQUESTED -> AWAITING_ADMISSION (invalid transition)
       log("Bot immediately admitted - skipping awaiting_admission callback to avoid race condition");
-      
       log("Successfully admitted to the Google Meet meeting - no waiting room required");
       return true;
     }
@@ -224,26 +218,25 @@ export async function waitForGoogleMeetingAdmission(
           throw new Error("Bot admission was rejected by meeting admin");
         }
 
-        // Admission indicators
+        // Admission indicators — authoritative, always wins
         const admissionFound = await checkForGoogleAdmissionIndicators(page);
-        const lobbyVisible = await checkForWaitingRoomIndicators(page);
-        if (admissionFound && !lobbyVisible) {
+        if (admissionFound) {
           log("✅ Bot admitted during polling window (meeting controls visible)");
           return true;
         }
 
-        // If lobby appears later, switch to waiting-room handling by breaking
+        // Only check for waiting room if NOT admitted
+        const lobbyVisible = await checkForWaitingRoomIndicators(page);
         if (lobbyVisible) {
           log("ℹ️ Waiting room appeared during polling. Switching to waiting-room monitoring...");
-          
-          // --- Call awaiting admission callback when waiting room appears during polling ---
+
           try {
             await callAwaitingAdmissionCallback(botConfig);
             log("Awaiting admission callback sent successfully (during polling)");
           } catch (callbackError: any) {
             log(`Warning: Failed to send awaiting admission callback: ${callbackError.message}. Continuing...`);
           }
-          
+
           stillInWaitingRoom = true;
           break;
         }
@@ -269,11 +262,10 @@ export async function waitForGoogleMeetingAdmission(
       }
     }
     
-    // Final check after waiting/polling
+    // Final check after waiting/polling — admission indicators are authoritative
     log("Performing final admission check after waiting/polling window...");
     const finalAdmissionFound = await checkForGoogleAdmissionIndicators(page);
-    const finalLobbyVisible = await checkForWaitingRoomIndicators(page);
-    if (finalAdmissionFound && !finalLobbyVisible) {
+    if (finalAdmissionFound) {
       await page.screenshot({ path: '/app/storage/screenshots/bot-checkpoint-2-admitted.png', fullPage: true });
       log("📸 Screenshot taken: Bot confirmed admitted to meeting");
       log("Successfully admitted to the Google Meet meeting");
