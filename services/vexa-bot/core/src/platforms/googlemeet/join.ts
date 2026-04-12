@@ -239,52 +239,123 @@ export async function joinGoogleMeeting(
     log(`Warning: Failed to send joining callback: ${callbackError.message}. Continuing with join process...`);
   }
 
-  // Add a longer, fixed wait after navigation for page elements to settle
+  // Wait for page elements to settle after navigation
   log("Waiting for page elements to settle after navigation...");
-  await page.waitForTimeout(5000); // Wait 5 seconds
-
-  // Enter name and join
-  await page.waitForTimeout(randomDelay(1000));
-  log("Attempting to find name input field...");
-  
-  // Use selector from selectors.ts instead of inline
-  const nameFieldSelector = googleNameInputSelectors[0];
-  await page.waitForSelector(nameFieldSelector, { timeout: 120000 }); // 120 seconds
-  log("Name input field found.");
-  
-  // Take screenshot after finding name field
-  await page.screenshot({ path: '/app/storage/screenshots/bot-checkpoint-0-name-field-found.png', fullPage: true });
-  log("📸 Screenshot taken: Name input field found");
+  await page.waitForTimeout(5000);
 
   await page.waitForTimeout(randomDelay(1000));
-  await page.fill(nameFieldSelector, botName);
 
-  // Mute mic and camera if available
+  // ── Smart join: detect anonymous vs signed-in flow ─────────────────────
+  // Anonymous: shows name input → fill name → click "Ask to join"
+  // Signed-in: skips name input → shows "Join now" / "Ask to join" directly
+  // We race both paths — whichever element appears first wins.
+  log("Detecting join flow (anonymous vs signed-in)...");
+
+  // Build combined selector: name input OR any join button
+  const nameSelectors = googleNameInputSelectors;
+  const joinSelectors = googleJoinButtonSelectors;
+  const allSelectors = [...nameSelectors, ...joinSelectors];
+
+  // Wait for ANY of these elements to appear (up to 120s)
+  let detectedElement: string | null = null;
+  let isAnonymousFlow = false;
+
   try {
-    await page.waitForTimeout(randomDelay(500));
-    const micSelector = googleMicrophoneButtonSelectors[0];
-    await page.click(micSelector, { timeout: 200 });
-    await page.waitForTimeout(200);
-  } catch (e) {
-    log("Microphone already muted or not found.");
-  }
-  
-  try {
-    await page.waitForTimeout(randomDelay(500));
-    const cameraSelector = googleCameraButtonSelectors[0];
-    await page.click(cameraSelector, { timeout: 200 });
-    await page.waitForTimeout(200);
-  } catch (e) {
-    log("Camera already off or not found.");
+    // Race: first visible element wins
+    const result = await Promise.race(
+      allSelectors.map(async (selector) => {
+        try {
+          await page.waitForSelector(selector, { timeout: 120000, state: 'visible' });
+          return selector;
+        } catch {
+          return null;
+        }
+      })
+    );
+    detectedElement = result;
+  } catch {
+    detectedElement = null;
   }
 
-  // Use join button selector from selectors.ts
-  const joinSelector = googleJoinButtonSelectors[0];
-  await page.waitForSelector(joinSelector, { timeout: 60000 });
-  await page.click(joinSelector);
+  // If the race finished but returned null (all timed out), try a fallback scan
+  if (!detectedElement) {
+    log("Race returned no result. Scanning for any visible element...");
+    for (const selector of allSelectors) {
+      try {
+        const el = await page.$(selector);
+        if (el && await el.isVisible()) {
+          detectedElement = selector;
+          break;
+        }
+      } catch {}
+    }
+  }
+
+  if (!detectedElement) {
+    // Last resort: take screenshot and throw
+    await page.screenshot({ path: '/app/storage/screenshots/bot-checkpoint-0-no-elements-found.png', fullPage: true });
+    throw new Error("Could not find name input or join button after 120 seconds");
+  }
+
+  isAnonymousFlow = nameSelectors.includes(detectedElement);
+  log(`Detected ${isAnonymousFlow ? 'ANONYMOUS' : 'SIGNED-IN'} flow (matched: ${detectedElement})`);
+
+  await page.screenshot({ path: '/app/storage/screenshots/bot-checkpoint-0-flow-detected.png', fullPage: true });
+  log("📸 Screenshot taken: Join flow detected");
+
+  if (isAnonymousFlow) {
+    // ── Anonymous flow: fill name, then find join button ──────────────────
+    log("Anonymous flow: filling bot name...");
+    await page.waitForTimeout(randomDelay(500));
+    await page.fill(detectedElement, botName);
+    log(`Filled bot name: ${botName}`);
+  }
+
+  // ── Mute mic and camera (both flows) ─────────────────────────────────
+  for (const micSelector of googleMicrophoneButtonSelectors) {
+    try {
+      const mic = await page.$(micSelector);
+      if (mic && await mic.isVisible()) {
+        await mic.click();
+        log("Microphone toggled.");
+        break;
+      }
+    } catch {}
+  }
+  await page.waitForTimeout(300);
+
+  for (const camSelector of googleCameraButtonSelectors) {
+    try {
+      const cam = await page.$(camSelector);
+      if (cam && await cam.isVisible()) {
+        await cam.click();
+        log("Camera toggled.");
+        break;
+      }
+    } catch {}
+  }
+  await page.waitForTimeout(300);
+
+  // ── Click join button ────────────────────────────────────────────────
+  let joined = false;
+  for (const joinSelector of joinSelectors) {
+    try {
+      const btn = await page.waitForSelector(joinSelector, { timeout: 15000, state: 'visible' });
+      if (btn) {
+        await btn.click();
+        log(`Clicked join button: ${joinSelector}`);
+        joined = true;
+        break;
+      }
+    } catch {}
+  }
+
+  if (!joined) {
+    await page.screenshot({ path: '/app/storage/screenshots/bot-checkpoint-0-no-join-button.png', fullPage: true });
+    throw new Error("Could not find or click any join button");
+  }
+
   log(`${botName} joined the Google Meet Meeting.`);
-  
-  // Take screenshot after clicking "Ask to join"
-  await page.screenshot({ path: '/app/storage/screenshots/bot-checkpoint-0-after-ask-to-join.png', fullPage: true });
-  log("📸 Screenshot taken: After clicking 'Ask to join'");
+  await page.screenshot({ path: '/app/storage/screenshots/bot-checkpoint-0-after-join.png', fullPage: true });
+  log("📸 Screenshot taken: After clicking join button");
 }
