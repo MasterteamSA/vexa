@@ -899,19 +899,40 @@ export async function startGoogleRecording(page: Page, botConfig: BotConfig): Pr
             };
 
             (window as any).getGoogleMeetActiveParticipants = () => {
-              const names = extractParticipantsFromMain((botConfigData as any)?.botName);
-              (window as any).logBot(`🔍 [Google Meet Participants] ${JSON.stringify(names)}`);
-              return names;
+              const botName = (botConfigData as any)?.botName;
+              const names = extractParticipantsFromMain(botName);
+              // Exclude the bot itself from the count — we want OTHER participants
+              const otherParticipants = botName
+                ? names.filter((n: string) => n.toLowerCase() !== botName.toLowerCase())
+                : names;
+              if (otherParticipants.length !== names.length) {
+                (window as any).logBot(`🔍 [Google Meet Participants] ${otherParticipants.length} others (excluded bot "${botName}"): ${JSON.stringify(otherParticipants)}`);
+              } else {
+                (window as any).logBot(`🔍 [Google Meet Participants] ${JSON.stringify(names)}`);
+              }
+              return otherParticipants;
             };
             (window as any).getGoogleMeetActiveParticipantsCount = () => {
-              // Primary: WebRTC-based participant count (reliable)
-              const webrtcCount = typeof (window as any).__vexaGetWebRTCParticipantCount === 'function'
-                ? (window as any).__vexaGetWebRTCParticipantCount()
-                : 0;
-              if (webrtcCount > 0) return webrtcCount;
+              // For leave detection, we need to know when everyone has LEFT.
+              // WebRTC SSRC/CSRC sources stay active after participants leave (comfort noise,
+              // SFU keepalive frames), so WebRTC count is unreliable for detecting ABSENCE.
+              // Use DOM count as primary — it reflects the actual participant list UI.
+              const domCount = (window as any).getGoogleMeetActiveParticipants().length;
 
-              // Fallback: DOM-based count (fragile but works if RTC hook didn't install)
-              return (window as any).getGoogleMeetActiveParticipants().length;
+              // WebRTC as secondary signal: if DOM shows 0 but WebRTC has recent sources,
+              // give a brief grace period (someone might still be connecting)
+              if (domCount <= 1) {
+                const webrtcCount = typeof (window as any).__vexaGetWebRTCParticipantCount === 'function'
+                  ? (window as any).__vexaGetWebRTCParticipantCount()
+                  : 0;
+                // Only trust WebRTC if it shows significantly more than DOM
+                // (e.g., DOM glitch where it lost track but WebRTC still sees sources)
+                if (webrtcCount > 2) {
+                  return webrtcCount;
+                }
+              }
+
+              return domCount;
             };
             
             // Setup Google Meet meeting monitoring (browser context)
@@ -963,11 +984,12 @@ export async function startGoogleRecording(page: Page, botConfig: BotConfig): Pr
                 // Check participant count using the comprehensive helper (now WebRTC-based with DOM fallback)
                 let currentParticipantCount = (window as any).getGoogleMeetActiveParticipantsCount ? (window as any).getGoogleMeetActiveParticipantsCount() : 0;
 
-                // Audio energy keep-alive: if we received transcription in the last 2 minutes,
-                // at least someone is speaking — don't consider the bot alone
-                const hasRecentTranscription = (Date.now() - ((window as any).__vexaLastTranscriptionTimestamp || 0)) < 120000;
+                // Audio energy keep-alive: if we received transcription in the last 30 seconds,
+                // someone was just speaking — don't consider the bot alone yet.
+                // 30s is enough to cover brief silences without delaying leave by minutes.
+                const hasRecentTranscription = (Date.now() - ((window as any).__vexaLastTranscriptionTimestamp || 0)) < 30000;
                 if (hasRecentTranscription && currentParticipantCount <= 1) {
-                  currentParticipantCount = 2; // Override: someone is definitely speaking
+                  currentParticipantCount = 2; // Override: someone was just speaking
                 }
                 
                 if (currentParticipantCount !== lastParticipantCount) {
