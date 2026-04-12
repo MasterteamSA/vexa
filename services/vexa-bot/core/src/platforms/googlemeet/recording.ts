@@ -401,11 +401,40 @@ export async function startGoogleRecording(page: Page, botConfig: BotConfig): Pr
                   const trackStream = await trackAudioService.createCombinedAudioStream([el]);
                   await trackAudioService.initializeAudioProcessor(trackStream);
 
+                  // Helper: send SPEAKER_START for this track if we know the speaker
+                  const sendTrackSpeakerIdentity = () => {
+                    const name = (window as any).__vexaGetSpeakerForTrack?.(trackId);
+                    if (name && trackWhisper.isReady() && !(trackWhisper as any).__speakerIdentitySent) {
+                      const sessionStart = trackAudioService.getSessionAudioStartTime();
+                      if (sessionStart) {
+                        trackWhisper.sendSpeakerEvent(
+                          'SPEAKER_START', name, trackId,
+                          Date.now() - sessionStart,
+                          (window as any).__vexaBotConfig
+                        );
+                        (trackWhisper as any).__speakerIdentitySent = name;
+                        (trackWhisper as any).__lastSpeakerSent = name;
+                        (window as any).logBot(`[PerSpeaker] Track ${i}: sent SPEAKER_START for "${name}" (identity declared)`);
+                      }
+                    }
+                  };
+
+                  // Poll every 500ms to send speaker identity as soon as CSRC mapping is learned
+                  const identityPollInterval = setInterval(() => {
+                    sendTrackSpeakerIdentity();
+                    // Stop polling once identity is sent
+                    if ((trackWhisper as any).__speakerIdentitySent) {
+                      clearInterval(identityPollInterval);
+                    }
+                  }, 500);
+
                   // Connect WhisperLive for this track
                   const trackOnMessage = (data: any) => {
                     if (data?.status === 'SERVER_READY') {
                       trackWhisper.setServerReady(true);
                       (window as any).logBot(`[PerSpeaker] Track ${i} (${trackId}) server ready.`);
+                      // Try to send speaker identity immediately on ready
+                      sendTrackSpeakerIdentity();
                     }
                     // Update last transcription timestamp for keep-alive
                     if (Array.isArray(data?.segments)) {
