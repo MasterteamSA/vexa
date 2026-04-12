@@ -146,4 +146,7 @@ test_data/
 *.mp4
 *.txt
 !**/requirements.txt
-manifest.csv
+manifest.csvnode_modules/
+google-auth-state.json
+package-lock.json
+package.json
