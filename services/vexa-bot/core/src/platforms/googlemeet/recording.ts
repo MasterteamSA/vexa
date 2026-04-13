@@ -369,9 +369,14 @@ export async function startGoogleRecording(page: Page, botConfig: BotConfig): Pr
             }
 
             // ── Per-speaker streams setup ─────────────────────────────────
-            // Check if the RTC hook created per-speaker audio elements
+            // Check if the RTC hook created per-speaker audio elements.
+            // DISABLED: per-speaker mode caused hallucination ("you"x225) because
+            // Last-3 SFU tracks are silent when their slot speakers aren't talking,
+            // and Whisper hallucinates on silence. The mixed stream is more reliable.
+            // Speaker attribution comes from DOM-based speaker events on the mixed session.
             const perSpeakerElements: HTMLAudioElement[] = (window as any).__vexaPerSpeakerAudioElements || [];
-            const perSpeakerMode = perSpeakerElements.length >= 2 && transcriptionEnabled;
+            const perSpeakerMode = false; // Force disable — use mixed stream only
+            (window as any).logBot(`[PerSpeaker] Found ${perSpeakerElements.length} per-speaker elements but mode is DISABLED. Using mixed stream.`);
 
             if (perSpeakerMode) {
               (window as any).logBot(`[PerSpeaker] Found ${perSpeakerElements.length} per-speaker audio elements. Setting up separate streams.`);
